@@ -88,8 +88,8 @@ module iuq_ibuf(
    );
 
       // buffer constants
-      parameter                          IDATA_WIDTH = (`IBUFF_INSTR_WIDTH + `EFF_IFAR_WIDTH + `EFF_IFAR_WIDTH);
-      parameter                          IBUFF_WIDTH = (`IBUFF_INSTR_WIDTH + `EFF_IFAR_WIDTH + `IBUFF_IFAR_WIDTH);
+      parameter                          IDATA_WIDTH = (`IBUFF_INSTR_WIDTH + `EFF_IFAR_WIDTH + `EFF_IFAR_WIDTH); // 70 + 20 + 20
+      parameter                          IBUFF_WIDTH = (`IBUFF_INSTR_WIDTH + `EFF_IFAR_WIDTH + `IBUFF_IFAR_WIDTH); // 70 + 20 + 20
       parameter                          IBUFF_DEPTH = (`IBUFF_DEPTH);
 
       // types for configurable width/depth
@@ -323,10 +323,29 @@ module iuq_ibuf(
 
       assign buffer_valid_flush = cp_flush_q | br_iu_redirect_q;
 
+      //buffer_advance
+      //how many advance occur in buffer?
+      //In other words, how many instruction is consumed by decoder?
+      //In fact, there is stall buffer, for backpressure case.
+      //so at least stall buffer can consume instruction buffer.
+      //stall buffer occupancy can be checked by stall_q
+      //if two stall buffer available --> buffer_advance2
+      //if one stall buffer available --> buffer_advance1
+      //  because stall_q[0] filled first, one stall buffer available only means 
+      //  ~stall_q[1]
+      //--> stall_q[1] means stall_q[0]
+      //one hot encoding used.
+      //buffer_advance[0] == 1'b1 --> no advance in buffer
+      //buffer_advance[1] == 1'b1 --> 1 advance in buffer
+      //buffer_advance[2] == 1'b1 --> 2 advance in buffer.
+      //why 2 is maximum? 
+      //  --> it is uarch design. fetch-decode-issue width is 2
+      //
+      //
       assign buffer_advance[0] = stall_q[1];
       assign buffer_advance[1] = stall_q[0] & (~stall_q[1]);
       assign buffer_advance[2] = (~stall_q[0]) & (~stall_q[1]);
-
+        
       //--------------------------------------
       // ibuff
       //--------------------------------------
@@ -347,12 +366,24 @@ module iuq_ibuf(
       //construct fastpath/stall data
       assign fast_data0[0:IDATA_WIDTH - 1] = {bp_ib_iu3_0_instr[0:`IBUFF_INSTR_WIDTH - 1], bp_ib_iu3_bta, bp_ib_iu3_ifar[62 - `EFF_IFAR_WIDTH:61]};
       assign fast_data1[0:IDATA_WIDTH - 1] = {bp_ib_iu3_1_instr[0:`IBUFF_INSTR_WIDTH - 1], bp_ib_iu3_bta, bp_ib_iu3_ifar[62 - `EFF_IFAR_WIDTH:59], ifar_1_ext[60:61]};
-
+      
+      // valid_in : if new incoming instruction has 
+          // 4 valid input --> valid_in = 4'b1111,
+          // 3 valid input --> valid_in = 4'b0111,
+          // ...
+          // 0 valid input --> valid_in = 4'b0000;
+          // somewhat cumulative 1 passion
       assign valid_in[0:3] = iu3_val[0:3];
 
       assign buffer_valid_act = buffer_valid_flush | valid_in[0] | (buffer_valid_q[0] & (buffer_advance[1] | buffer_advance[2]));
 
-      assign buffer_valid_din[0:`IBUFF_DEPTH - 1] = (buffer_advance[0] == 1'b1 & valid_in[3] == 1'b1) ? {4'b1111, buffer_valid_q[0:`IBUFF_DEPTH - 5]} :
+      //buffer_valid_din / or buffer_valid_q
+      //has valid flag for each instruction in buffer
+      //they are not circular queue, they are growing 1s(ones) from 0th bit
+      //if buffer advance, 0s expand from MSB(IBUFF_DETP-1'th bit)
+      //if buffer is filled, 1s expend from LSB(0th bit)
+      //ex) 3 instr valid --> IBUFF_DEPTH'b111000000000....
+      assign buffer_valid_din[0:`IBUFF_DEPTH - 1] = (buffer_advance[0] == 1'b1 & valid_in[3] == 1'b1) ? {4'b1111, buffer_valid_q[0:`IBUFF_DEPTH - 5]} : // 4 in, zero out
                                                    (buffer_advance[1] == 1'b1 & valid_in[3] == 1'b1) ? {3'b111, buffer_valid_q[0:`IBUFF_DEPTH - 4]} :
                                                    (buffer_advance[2] == 1'b1 & valid_in[3] == 1'b1) ? {2'b11, buffer_valid_q[0:`IBUFF_DEPTH - 3]} :
                                                    (buffer_advance[0] == 1'b1 & valid_in[2] == 1'b1) ? {3'b111, buffer_valid_q[0:`IBUFF_DEPTH - 4]} :
@@ -366,14 +397,31 @@ module iuq_ibuf(
                                                    (buffer_advance[2] == 1'b1 & valid_in[0] == 1'b1) ? {buffer_valid_q[1:`IBUFF_DEPTH - 1], 1'b0} :
                                                    (buffer_advance[0] == 1'b1 & valid_in[0] == 1'b0) ? buffer_valid_q[0:`IBUFF_DEPTH - 1] :
                                                    (buffer_advance[1] == 1'b1 & valid_in[0] == 1'b0) ? {buffer_valid_q[1:`IBUFF_DEPTH - 1], 1'b0} :
-                                                   {buffer_valid_q[2:`IBUFF_DEPTH - 1], 2'b00};
-
+                                                   {buffer_valid_q[2:`IBUFF_DEPTH - 1], 2'b00}; // no in, 2 out
+      // buffer bypass:
+      // how many input instruction is consumed to processor backend, not from
+      // buffer data.
+      // if no valid instruction in buffer, they will use input
+      // instruction(fast_data)
+      // what if not enough instruction comes?
+      //  ex) buffer_advance ==2, but no buffer valid.
+      //      how do we know there are at least 2 valid fast_data?
+      //      Because buffer_advance ==2 already means that there are 2 valid
+      //      (fast_)data
       assign buffer_bypass[2] = (buffer_advance[2] == 1'b1 & buffer_valid_q[0] == 1'b0);
       assign buffer_bypass[1] = (buffer_advance[2] == 1'b1 & buffer_valid_q[0] == 1'b1 & buffer_valid_q[1] == 1'b0) | (buffer_advance[1] == 1'b1 & buffer_valid_q[0] == 1'b0);
       assign buffer_bypass[0] = (buffer_advance[2] == 1'b1 & buffer_valid_q[1] == 1'b1) | (buffer_advance[1] == 1'b1 & buffer_valid_q[0] == 1'b1) | (buffer_advance[0] == 1'b1);
 
       assign buffer_head_act = buffer_valid_flush | valid_in[0];
-
+      
+      // buffer head: 
+      // indicate instruction buffer head.
+      // only 1 bit is 1, other bits are 0.
+      // it is maintained as circular queue fashion.
+      // if new instruction fills in, head move to MSB
+      // # of instruction fills in is calculated from 
+      // number of valid input - bypassed input
+      // initial value : MSB=1 (see buffer_head_d)
       assign buffer_head_din[0:`IBUFF_DEPTH - 1] = (buffer_bypass[2] == 1'b1 & valid_in[3] == 1'b1) ? {buffer_head_q[`IBUFF_DEPTH - 2:`IBUFF_DEPTH - 1], buffer_head_q[0:`IBUFF_DEPTH - 3]} :
                                                   (buffer_bypass[2] == 1'b1 & valid_in[2] == 1'b1) ? {buffer_head_q[`IBUFF_DEPTH - 1], buffer_head_q[0:`IBUFF_DEPTH - 2]} :
                                                   (buffer_bypass[1] == 1'b1 & valid_in[3] == 1'b1) ? {buffer_head_q[`IBUFF_DEPTH - 3:`IBUFF_DEPTH - 1], buffer_head_q[0:`IBUFF_DEPTH - 4]} :
@@ -387,12 +435,36 @@ module iuq_ibuf(
 
       assign buffer_tail_act = buffer_valid_flush | (buffer_valid_q[0] & (buffer_advance[1] | buffer_advance[2]));
 
+
+      // buffer tail:
+      // indicate instruction buffer tail.
+      // only 1 bit is 1, other bits are 0
+      // initial value is MSB=1 (see buffer_tail_d!)
+      // it is also for circular queue, which is same as buffer head.
+      // buffer tail is advanced when buffer data is comsumed.
+      // Note that buffer_advance != number of buffer data used.
+      // buffer_advance is the number of instruction consumed.
+      // buffer_advance includes "fast data" comsumption.
+      // So for caculating tail, need to check buffer_valid flag
       assign buffer_tail_din[0:`IBUFF_DEPTH - 1] = (buffer_advance[2] == 1'b1 & buffer_valid_q[1] == 1'b1) ? {buffer_tail_q[`IBUFF_DEPTH - 2:`IBUFF_DEPTH - 1], buffer_tail_q[0:`IBUFF_DEPTH - 3]} :
                                                    (buffer_advance[2] == 1'b1 & buffer_valid_q[0] == 1'b1) ? {buffer_tail_q[`IBUFF_DEPTH - 1], buffer_tail_q[0:`IBUFF_DEPTH - 2]} :
                                                    (buffer_advance[1] == 1'b1 & buffer_valid_q[0] == 1'b1) ? {buffer_tail_q[`IBUFF_DEPTH - 1], buffer_tail_q[0:`IBUFF_DEPTH - 2]} :
                                                     buffer_tail_q[0:`IBUFF_DEPTH - 1];
 
       //configurable depth buffer
+      //real instrution buffer's din
+      //circular queue with 4 possible input
+      //no need to erase tail --> just remove buffer_valid bit
+      //just add new instruction to head.
+      //0~3th din is separate from general case because of circular wrapping
+      //just need to know ith case.
+      //din is calculated from buffer bypass and buffer head.
+      //ex) no bypass, head is itself --> data0_in
+      //    no bypass, head is 2 previous index --> data2_in
+      //    2 bypass, head is itself --> data2_in
+      //what happen if not enough datax_in?
+      //this case is treated by buffer valid signal. for buffer data, just put
+      //in garbage value.
       generate
          begin : xhdl1
             genvar                             i;
@@ -556,7 +628,14 @@ assign iu4_stall = iu4_0_valid_q & id_ib_iu4_stall;
 //--------------------------------------
 // stall buffer
 //--------------------------------------
-
+// in case of stall, instr from ibuffer is temporarily saved in stall buffer
+// stall buffer nomarlly accept every instruction from ibuffer,
+// but it stops accepting when processor keep stalling.
+// please note that stall buffer saving is only meaningful when instruction is
+// valid. that is why valid_int is used for stall_d calculation.
+// please note that uc_swap only occurs when data_out is microcode op.
+// so it is not normal case.
+//
 assign valid_int[0] = buffer_valid_q[0] | iu3_val[0] | stall_q[0];
 assign valid_int[1] = (stall_q[0] == 1'b0) ? (buffer_valid_q[0] & iu3_val[0]) | buffer_valid_q[1] | iu3_val[1] | stall_q[1] :
                       buffer_valid_q[0] | iu3_val[0] | stall_q[1];
@@ -611,6 +690,9 @@ assign iu4_1_fuse_data_din = data0_out[0:31];
 // ucode muxing
 //--------------------------------------
 
+// if "will be issued" instruction is ucode instruction(flag bit is in 56th
+// bit)
+// Then temporarily swap to ucode mode.
 assign ucode_out[0] = data0_out[56];
 assign ucode_out[1] = data1_out[56];
 
