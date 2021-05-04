@@ -301,6 +301,9 @@ module iuq_ibuf(
       //tidn    <= '0';
       assign tiup = 1'b1;
 
+      //cp_iu_i3_flush : tlb_miss, interrupt, exception(like div by 0), debug control
+      //uc_ib_iu3_flush_all : microcode related flush.
+      //br_iu_redirect_d : flush due to branch misprediction
       assign cp_flush_d = cp_iu_iu3_flush | uc_ib_iu3_flush_all;
       assign br_iu_redirect_d = br_iu_redirect & (~(cp_flush_q));
       assign cp_flush_into_uc_delay_d = {(cp_flush_into_uc), (cp_flush_into_uc_delay_q[0] & (~(cp_iu_iu3_flush)))};
@@ -341,7 +344,7 @@ module iuq_ibuf(
       //why 2 is maximum? 
       //  --> it is uarch design. fetch-decode-issue width is 2
       //
-      //
+      /
       assign buffer_advance[0] = stall_q[1];
       assign buffer_advance[1] = stall_q[0] & (~stall_q[1]);
       assign buffer_advance[2] = (~stall_q[0]) & (~stall_q[1]);
@@ -623,6 +626,8 @@ endgenerate
 // incoming stall
 //--------------------------------------
 
+// iu4 pipe has valid instr(iu4_0_valid_q) but there is backpressure
+// (id_ib_iu4_stall == iu5_stall)
 assign iu4_stall = iu4_0_valid_q & id_ib_iu4_stall;
 
 //--------------------------------------
